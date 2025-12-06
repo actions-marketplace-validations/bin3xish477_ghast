@@ -1,6 +1,7 @@
 """analyzer.py contains all the INFOic related to analyzing GitHub Actions"""
 
 from re import search, DOTALL
+from pathlib import Path
 from colors import Colors
 
 import analyzer.regex
@@ -24,7 +25,8 @@ class Analyzer:
         self.checks = {
             "_check_for_3p_actions_without_hash": {"level": "FAIL"},
             "_check_for_allow_unsecure_commands": {"level": "FAIL"},
-            "_check_for_cache_action_usage": {"level": "WARN"},
+            "_check_for_cache_action": {"level": "WARN"},
+            "_check_for_upload_download_artifact_action": {"level": "WARN"},
             "_check_for_dangerous_write_permissions": {"level": "FAIL"},
             "_check_for_inline_script": {"level": "WARN"},
             "_check_for_pull_request_target": {"level": "FAIL"},
@@ -33,9 +35,18 @@ class Analyzer:
             "_check_for_aws_configure_credentials_non_oidc": {"level": "WARN"},
             "_check_for_create_or_approve_pull_request": {"level": "FAIL"},
             "_check_for_remote_script": {"level": "WARN"},
+            "_check_for_non_github_managed_actions": {"level": "WARN"},
         }
+        self.auxiliary_checks = [
+            "_check_for_missing_codeowners_file",
+            "_check_for_missing_security_md_file",
+            "_check_for_missing_gitignore_file",
+            "_check_for_missing_dockerignore_file",
+        ]
         self.action = {}
         self.jobs = {}
+
+        self._run_aux_checks()
 
     def _print_failed_check_msg(self, check: str, level: str):
         color = None
@@ -69,8 +80,8 @@ class Analyzer:
                             print(
                                 f"{Colors.LIGHT_GRAY}INFO{Colors.END} step using action('{uses}') with version number instead of a SHA hash"
                             )
-                        passed = False
-                        break
+                        if passed:
+                            passed = False
         return passed
 
     def _check_for_inline_script(self) -> bool:
@@ -152,7 +163,7 @@ class Analyzer:
                         passed = False
         return passed
 
-    def _check_for_cache_action_usage(self) -> bool:
+    def _check_for_cache_action(self) -> bool:
         passed = True
         for job in self.jobs.keys():
             steps = self.jobs[job]["steps"]
@@ -163,6 +174,21 @@ class Analyzer:
                         if self.verbose:
                             print(
                                 f"{Colors.LIGHT_GRAY}INFO{Colors.END} job('{job}') is using cache action('{action.group()}')"
+                            )
+                        passed = False
+        return passed
+
+    def _check_for_upload_download_artifact_action(self) -> bool:
+        passed = True
+        for job in self.jobs.keys():
+            steps = self.jobs[job]["steps"]
+            for step in steps:
+                if "uses" in step:
+                    action = search(analyzer.regex.UPLOAD_DOWNLOAD_ARTIFACTS_ACTION, step["uses"])
+                    if action:
+                        if self.verbose:
+                            print(
+                                f"{Colors.LIGHT_GRAY}INFO{Colors.END} job('{job}') is using upload|download artifact action('{action.group()}')"
                             )
                         passed = False
         return passed
@@ -309,6 +335,80 @@ class Analyzer:
                                 passed = False
         return passed
 
+    def _check_for_non_github_managed_actions(self) -> bool:
+        passed = True
+        for job in self.jobs:
+            for step in self.jobs[job]["steps"]:
+                if "uses" in step:
+                    action = step["uses"].strip()
+                    if not search(analyzer.regex.GITHUB_MANAGED_ACTION, action):
+                        if self.verbose:
+                            print(
+                                f"{Colors.LIGHT_GRAY}INFO{Colors.END} using non GitHub-managed action('{action}') - make sure its safe to use!"
+                            )
+                        passed = False
+        return passed
+
+    # ==================================================================
+    # ======================== Auxiliary Checks ========================
+    # ==================================================================
+
+    def _check_for_missing_codeowners_file(self) -> None:
+        if not Path(".github/workflows/CODEOWNERS").exists():
+            print(
+                f"{Colors.LIGHT_BLUE}AUXI{Colors.END} missing CODEOWNERS file"
+                " which can provide additional protections for your workflow files."
+            )
+        else:
+            if self.verbose:
+                print(f"{Colors.LIGHT_BLUE}AUXI{Colors.END} found CODEOWNERS file!")
+
+    def _check_for_missing_security_md_file(self) -> None:
+        security_md = 'SECURITY.md'
+        if not Path(security_md).exists() or not Path(security_md.lower()).exists():
+            print(
+                f"{Colors.LIGHT_BLUE}AUXI{Colors.END} missing SECURITY.md file"
+                " which is crucial for researchers looking to report a finding."
+            )
+        else:
+            if self.verbose:
+                print(f"{Colors.LIGHT_BLUE}AUXI{Colors.END} found SECURITY.md file!")
+
+    def _check_for_missing_gitignore_file(self) -> None:
+        if not Path('.gitignore').exists():
+            print(
+                f"{Colors.LIGHT_BLUE}AUXI{Colors.END} missing .gitignore file - make sure you aren't commiting any sensitive folders/files."
+            )
+        else:
+            if self.verbose:
+                print(f"{Colors.LIGHT_BLUE}AUXI{Colors.END} found .gitignore file!")
+
+    def _check_for_missing_dockerignore_file(self) -> None:
+        using_docker = False
+        for f in Path(".").iterdir():
+            if f.is_file():
+                if f.suffix == ".dockerfile":
+                    using_docker = True
+                elif f == "Dockerfile":
+                    using_docker = True
+        if using_docker:
+            if not Path(".dockerignore").exists():
+                print(
+                    f"{Colors.LIGHT_BLUE}AUXI{Colors.END} missing .dockerignore file - make sure you aren't commiting any sensitive folders/files into your containerized apps."
+                )
+            else:
+                if self.verbose:
+                    print(f"{Colors.LIGHT_BLUE}AUXI{Colors.END} found .dockerignore file!")
+
+    def _run_aux_checks(self) -> None:
+        """Runs auxiliary checks which are checks for security-related
+        configurations/properties/mechanisms that contribute to more secure
+        GitHub Actions workflows.
+        """
+        # TODO:
+        for check in self.auxiliary_checks:
+            Analyzer.__dict__[check](self)
+
     def get_checks(self) -> list:
         """Returns list containing available checks.
 
@@ -344,5 +444,4 @@ class Analyzer:
                         passed_all_checks = False
             for check in fail_checks:
                 self._print_failed_check_msg(check, self.checks[check]["level"])
-
         return passed_all_checks
